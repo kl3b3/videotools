@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Baut VideoTools-GUI.app aus main.swift + Info.plist.
+# Baut VideoTools-GUI.app aus Sources/*.swift + Info.plist.
 # Bündelt ffmpeg/ffprobe MIT allen dynamischen Bibliotheken in die .app,
 # damit das Bundle eigenständig funktioniert (auch ohne Homebrew).
 set -euo pipefail
@@ -24,13 +24,13 @@ else
     echo "    ⚠ Kein Icon gefunden unter $ICON_SRC"
 fi
 
-echo "▶ Kompiliere main.swift → $BIN"
+echo "▶ Kompiliere Sources/*.swift → $BIN"
 swiftc \
   -O \
   -target arm64-apple-macos14 \
   -parse-as-library \
   -o "$BIN" \
-  "$HERE/main.swift"
+  "$HERE/Sources/"*.swift
 chmod +x "$BIN"
 
 # ─────────────────────────────────────────────────────────────────────────
