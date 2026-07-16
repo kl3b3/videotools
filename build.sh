@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Baut VideoTools-GUI.app aus Sources/*.swift + Info.plist.
+# Baut VideoTools.app aus Sources/*.swift + Info.plist.
 # Bündelt ffmpeg/ffprobe MIT allen dynamischen Bibliotheken in die .app,
 # damit das Bundle eigenständig funktioniert (auch ohne Homebrew).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-APP="$HERE/../VideoTools-GUI.app"
+APP="$HERE/../VideoTools.app"
 BIN="$APP/Contents/MacOS/VideoTools"
 RES="$APP/Contents/Resources"
 LIBS="$APP/Contents/Frameworks"
