@@ -16,7 +16,7 @@ mkdir -p "$APP/Contents/MacOS" "$RES" "$LIBS"
 cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
 
 # App-Icon
-ICON_SRC="$HERE/../MyIcon.icns"
+ICON_SRC="$HERE/MyIcon.icns"
 if [[ -f "$ICON_SRC" ]]; then
     cp "$ICON_SRC" "$RES/AppIcon.icns"
     echo "    ✓ Icon: $ICON_SRC → Resources/AppIcon.icns"
