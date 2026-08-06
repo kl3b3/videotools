@@ -266,6 +266,24 @@ struct TranscodePreset: Codable, Equatable, Identifiable {
         "\(base)\(baseSuffix)\(rendition.filenameSuffix).\(rendition.container.fileExtension)"
     }
 
+    /// Namensschlüssel einer Rendition (Suffix + Endung) – identischer Schlüssel
+    /// innerhalb eines Presets bedeutet: gleiche Ausgabedatei.
+    func outputKey(_ rendition: Rendition) -> String {
+        "\(baseSuffix)\(rendition.filenameSuffix).\(rendition.container.fileExtension)"
+    }
+
+    /// Namensschlüssel, die mehrfach vorkommen – die spätere Rendition würde
+    /// die frühere überschreiben.
+    var duplicateOutputKeys: Set<String> {
+        var seen: Set<String> = []
+        var duplicates: Set<String> = []
+        for r in renditions {
+            let key = outputKey(r)
+            if !seen.insert(key).inserted { duplicates.insert(key) }
+        }
+        return duplicates
+    }
+
     // -------------------------------------------------------------------
     // Eingebaute Presets (Stand: Pflege-JSON des API-Servers)
     // -------------------------------------------------------------------

@@ -442,10 +442,29 @@ final class AppModel {
         }
 
         let renditionCount = preset.renditions.count
+        var producedFiles: Set<String> = []
         for (rIdx, rendition) in preset.renditions.enumerated() {
             if cancelled { break }
             let fileName = preset.outputFileName(base: baseName(of: input), rendition: rendition)
             let outFile = outputPath(for: input, fileName: fileName)
+
+            // Kollisionsschutz: identischer Dateiname wie eine frühere Rendition
+            // (würde sie überschreiben) oder wie die Quelldatei selbst.
+            if producedFiles.contains(outFile) {
+                logWarning("\(rendition.name) übersprungen – Dateiname bereits vergeben",
+                           detail: "\(fileName) wurde in diesem Lauf schon erzeugt. Suffix im Preset anpassen.")
+                updateStepProgress(stepIndex: stepIndex, stepCount: stepCount,
+                                   inner: Double(rIdx + 1) / Double(renditionCount))
+                continue
+            }
+            if outFile == input.path {
+                logError("\(rendition.name) übersprungen – Ausgabe würde die Quelldatei überschreiben",
+                         detail: fileName)
+                updateStepProgress(stepIndex: stepIndex, stepCount: stepCount,
+                                   inner: Double(rIdx + 1) / Double(renditionCount))
+                continue
+            }
+            producedFiles.insert(outFile)
 
             sep()
             switch rendition.container {
