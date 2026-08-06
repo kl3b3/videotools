@@ -10,7 +10,7 @@ import Observation
 @Observable
 final class AppModel {
     var mode: Mode = .all
-    var log: String = ""
+    var entries: [LogEntry] = []
     var isRunning = false
     var currentFile: String = ""
     var queue: [URL] = []
@@ -28,12 +28,17 @@ final class AppModel {
     }
 
     private let store: PresetStore
+    private let techLog: TechLog
     private var currentProcess: Process?
     private var cancelled = false
 
     private static let targetFolderKey = "VideoTools.targetFolder"
 
+    /// Ordner mit den technischen Logdateien (für „Im Finder öffnen“).
+    var techLogDirectory: URL { techLog.directory }
+
     init() {
+        self.techLog = TechLog()
         let store = PresetStore()
         self.store = store
         var loaded = store.load()
@@ -71,9 +76,36 @@ final class AppModel {
 
     // -------------------------------------------------------------------
 
-    func append(_ s: String) { log += stripANSI(s) }
+    /// Eintrag fürs Fenster-Log; wird parallel ins technische Log geschrieben.
+    private func logEntry(_ kind: LogEntry.Kind, _ text: String,
+                          detail: String? = nil, path: String? = nil) {
+        entries.append(LogEntry(kind: kind, text: text, detail: detail, path: path))
+        let prefix: String
+        switch kind {
+        case .header:  prefix = "▶ "
+        case .info:    prefix = "ℹ "
+        case .success: prefix = "✓ "
+        case .warning: prefix = "⚠ "
+        case .error:   prefix = "❌ "
+        }
+        var line = prefix + text
+        if let detail { line += "  (\(detail))" }
+        if let path { line += "  → \(path)" }
+        techLog.write(line + "\n")
+    }
 
-    func clearLog() { log = "" }
+    func logHeader(_ text: String, detail: String? = nil) { logEntry(.header, text, detail: detail) }
+    func logInfo(_ text: String, detail: String? = nil, path: String? = nil) { logEntry(.info, text, detail: detail, path: path) }
+    func logSuccess(_ text: String, detail: String? = nil, path: String? = nil) { logEntry(.success, text, detail: detail, path: path) }
+    func logWarning(_ text: String, detail: String? = nil) { logEntry(.warning, text, detail: detail) }
+    func logError(_ text: String, detail: String? = nil) { logEntry(.error, text, detail: detail) }
+
+    /// Technisches Detail: landet nur in der Logdatei, nicht im Fenster.
+    func tech(_ s: String) {
+        techLog.write(stripANSI(s))
+    }
+
+    func clearLog() { entries.removeAll() }
 
     func enqueue(_ urls: [URL]) {
         queue.append(contentsOf: urls)
@@ -91,9 +123,9 @@ final class AppModel {
         statusText = "Abbrechen …"
     }
 
-    /// Streamt Tool-Ausgaben zurück in den Log (von beliebigem Thread aus).
-    private var logSink: @Sendable (String) -> Void {
-        { [weak self] s in Task { @MainActor in self?.append(s) } }
+    /// Streamt Tool-Ausgaben (stderr etc.) ins technische Log (von beliebigem Thread aus).
+    private var techSink: @Sendable (String) -> Void {
+        { [weak self] s in Task { @MainActor in self?.tech(s) } }
     }
 
     // -------------------------------------------------------------------
@@ -113,13 +145,15 @@ final class AppModel {
         }
 
         if Tools.locate("ffmpeg") == nil || Tools.locate("ffprobe") == nil {
-            append("❌  ffmpeg/ffprobe nicht gefunden. brew install ffmpeg – oder im Bundle bereitstellen.\n")
+            logError("ffmpeg/ffprobe nicht gefunden.",
+                     detail: "Mit „brew install ffmpeg“ installieren – oder im Bundle bereitstellen.")
             queue.removeAll()
             return
         }
 
         if mode.usesPreset, settings.selectedPreset == nil {
-            append("❌  Kein aktives Transcoding-Preset. In den Einstellungen (⌘,) ein Preset aktivieren.\n")
+            logError("Kein aktives Transcoding-Preset.",
+                     detail: "In den Einstellungen (⌘,) ein Preset aktivieren.")
             queue.removeAll()
             return
         }
@@ -131,26 +165,25 @@ final class AppModel {
             if !exists {
                 do {
                     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                    append("ℹ  Zielordner neu angelegt: \(dir.path)\n")
+                    logInfo("Zielordner neu angelegt", path: dir.path)
                 } catch {
-                    append("❌  Zielordner nicht verfügbar: \(error.localizedDescription)\n")
+                    logError("Zielordner nicht verfügbar", detail: error.localizedDescription)
                     queue.removeAll()
                     return
                 }
             } else if !isDir.boolValue {
-                append("❌  Zielpfad ist keine Directory: \(dir.path)\n")
+                logError("Zielpfad ist kein Ordner", detail: dir.path)
                 queue.removeAll()
                 return
             }
-            append("ℹ  Zielordner: \(dir.path)\n")
+            logInfo("Zielordner", path: dir.path)
         }
 
         while !queue.isEmpty, !cancelled {
             let url = queue.removeFirst()
             currentFile = url.lastPathComponent
-            append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-            append("▶  \(url.lastPathComponent)  —  \(mode.label)\n")
-            append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+            tech("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+            logHeader(url.lastPathComponent, detail: mode.label)
 
             switch mode {
             case .all:
@@ -173,9 +206,9 @@ final class AppModel {
         }
 
         if cancelled {
-            append("\n⛔  Abgebrochen.\n")
+            logWarning("Abgebrochen – Warteschlange geleert.")
         } else {
-            append("\n✓  Alle Dateien verarbeitet.\n")
+            logSuccess("Alle Dateien verarbeitet.")
             NSSound(named: .init("Glass"))?.play()
         }
     }
@@ -201,7 +234,7 @@ final class AppModel {
             "-show_entries", "format=duration",
             "-of", "json",
             url.path
-        ], onStderr: logSink, register: { currentProcess = $0 })
+        ], onStderr: techSink, register: { currentProcess = $0 })
         currentProcess = nil
         guard let data, let p = try? JSONDecoder().decode(ProbeSummary.self, from: data) else {
             return (0, false)
@@ -215,20 +248,20 @@ final class AppModel {
     // ---- info -----------------------------------------------------------
 
     private func runInfo(_ input: URL, stepCount: Int, stepIndex: Int) async {
-        sep(); append("ℹ  Extrahiere Metadaten: \(input.lastPathComponent)\n"); sep()
+        sep()
         statusText = "Metadaten …"; progress = -1
 
         guard let ffprobe = Tools.locate("ffprobe") else {
-            append("❌  ffprobe nicht gefunden.\n"); return
+            logError("ffprobe nicht gefunden."); return
         }
 
         let (data, _) = await ProcessRunner.capture(ffprobe, args: [
             "-v", "quiet", "-print_format", "json",
             "-show_format", "-show_streams", input.path
-        ], onStderr: logSink, register: { currentProcess = $0 })
+        ], onStderr: techSink, register: { currentProcess = $0 })
         currentProcess = nil
         guard let data, let probe = try? JSONDecoder().decode(FFProbeOutput.self, from: data) else {
-            append("❌  ffprobe-Ausgabe konnte nicht gelesen werden.\n"); return
+            logError("Metadaten konnten nicht gelesen werden", detail: "Details im technischen Log"); return
         }
 
         let durSec   = Int(Double(probe.format.duration ?? "0") ?? 0)
@@ -296,14 +329,18 @@ final class AppModel {
           Samplerate       : \((Int(a?.sample_rate ?? "0") ?? 0) / 1000) KHz
           Kanäle           : \(a?.channels ?? 0)\(estimateBlock)
         """
-        append(report + "\n")
+        tech(report + "\n")
+
+        // Kompakte, verständliche Zusammenfassung fürs Fenster
+        let codec = (v?.codec_name ?? "?").uppercased()
+        let summary = "\(v?.width ?? 0)×\(v?.height ?? 0) · \(fps) fps · \(hms(durSec)) · \(codec) · \(String(format: "%.1f", sizeMB)) MB · \(scan)"
 
         let outTxt = outputPath(for: input, fileName: "\(baseName(of: input))_metadata.txt")
         do {
             try report.write(toFile: outTxt, atomically: true, encoding: .utf8)
-            append("✓  Metadaten gespeichert → \(outTxt)\n")
+            logSuccess("Metadaten gespeichert", detail: summary, path: outTxt)
         } catch {
-            append("❌  Konnte Metadaten-Datei nicht schreiben: \(error.localizedDescription)\n")
+            logError("Metadaten-Datei konnte nicht geschrieben werden", detail: error.localizedDescription)
         }
         updateStepProgress(stepIndex: stepIndex, stepCount: stepCount, inner: 1)
     }
@@ -312,13 +349,14 @@ final class AppModel {
 
     private func runStill(_ input: URL, atSecond: Int, stepCount: Int, stepIndex: Int) async {
         guard let ffmpeg = Tools.locate("ffmpeg") else {
-            append("❌  ffmpeg nicht gefunden.\n"); return
+            logError("ffmpeg nicht gefunden."); return
         }
         // Bei sehr kurzen Clips läge der Zeitpunkt hinter dem letzten Frame.
         var at = Double(atSecond)
         let duration = (await probeVideo(input)).duration
         if duration > 0, at >= duration { at = duration / 2 }
-        sep(); append("ℹ  Extrahiere Stills bei \(String(format: "%.1f", at))s …\n")
+        sep()
+        logInfo("Erzeuge Vorschaubilder", detail: "bei Sekunde \(String(format: "%.1f", at)), 3 Größen")
         let sizes: [(String, String)] = [
             ("small",  "320:180"),
             ("medium", "640:360"),
@@ -326,7 +364,7 @@ final class AppModel {
         ]
         for (idx, (label, size)) in sizes.enumerated() {
             if cancelled { break }
-            statusText = "Still \(label)"
+            statusText = "Vorschaubild \(label)"
             let outPath = outputPath(for: input, fileName: "\(baseName(of: input))_still_\(label).jpg")
             let args = [
                 "-ss", String(format: "%.2f", at), "-i", input.path,
@@ -335,13 +373,15 @@ final class AppModel {
                 "-q:v", "5", "-y", outPath,
                 "-loglevel", "error"
             ]
-            let code = await ProcessRunner.live(ffmpeg, args: args, onLog: logSink,
+            tech("$ ffmpeg \(args.joined(separator: " "))\n")
+            let code = await ProcessRunner.live(ffmpeg, args: args, onLog: techSink,
                                                 register: { currentProcess = $0 })
             currentProcess = nil
             if code == 0 {
-                append("✓  Still (\(label)) → \(outPath)\n")
+                logSuccess("Vorschaubild \(label)", path: outPath)
             } else {
-                append("❌  Still (\(label)) exit \(code)\n")
+                tech("Still \(label): exit \(code)\n")
+                logWarning("Vorschaubild \(label) fehlgeschlagen", detail: "Details im technischen Log")
             }
             let inner = Double(idx + 1) / Double(sizes.count)
             updateStepProgress(stepIndex: stepIndex, stepCount: stepCount, inner: inner)
@@ -357,7 +397,8 @@ final class AppModel {
             return "aac"
         case .fdkAAC:
             if await !Tools.hasEncoder("libfdk_aac") {
-                append("⚠  libfdk_aac ist in diesem ffmpeg-Build nicht enthalten – die Transkodierung wird vermutlich fehlschlagen.\n")
+                logWarning("libfdk_aac ist in diesem ffmpeg-Build nicht enthalten",
+                           detail: "Die Transkodierung wird vermutlich fehlschlagen.")
             }
             return "libfdk_aac"
         case .auto:
@@ -368,17 +409,18 @@ final class AppModel {
 
     private func runEncode(_ input: URL, preset: TranscodePreset, stepCount: Int, stepIndex: Int) async {
         guard let ffmpeg = Tools.locate("ffmpeg") else {
-            append("❌  ffmpeg nicht gefunden.\n"); return
+            logError("ffmpeg nicht gefunden."); return
         }
         guard !preset.renditions.isEmpty else {
-            append("⚠  Preset „\(preset.label)“ hat keine Renditions – nichts zu tun.\n")
+            logWarning("Preset „\(preset.label)“ hat keine Renditions – nichts zu tun.")
             return
         }
-        sep(); append("ℹ  Starte Transkodierung: \(input.lastPathComponent)\n")
-        append("ℹ  Preset: \(preset.label)\n")
+        sep()
+        let outputWord = preset.renditions.count == 1 ? "1 Ausgabe" : "\(preset.renditions.count) Ausgaben"
+        logInfo("Transkodiere mit Preset „\(preset.label)“", detail: outputWord)
 
         let probe = await probeVideo(input)
-        if probe.duration <= 0 { append("⚠  Dauer unbekannt – Fortschritt indeterminate.\n") }
+        if probe.duration <= 0 { logWarning("Videodauer unbekannt – keine Prozentanzeige möglich.") }
 
         let hasVideoRenditions = preset.renditions.contains { $0.container == .mp4 }
 
@@ -390,13 +432,13 @@ final class AppModel {
             case .auto:   deinterlace = probe.isInterlaced
             }
             if deinterlace {
-                append("ℹ  Deinterlacing aktiv (yadif).\n")
+                logInfo("Quelle ist interlaced – Deinterlacing wird angewendet.")
             }
         }
 
         let resolvedAudio = hasVideoRenditions ? await resolveAudioCodec() : "aac"
         if hasVideoRenditions {
-            append("ℹ  Audio-Codec (MP4): \(resolvedAudio)\n")
+            tech("Audio-Codec (MP4): \(resolvedAudio)\n")
         }
 
         let renditionCount = preset.renditions.count
@@ -408,9 +450,9 @@ final class AppModel {
             sep()
             switch rendition.container {
             case .mp4:
-                append("ℹ  Transkodiere → \(rendition.name) (\(rendition.scaleDescription)) …\n")
+                logInfo("\(rendition.name) wird erstellt", detail: "\(rendition.width)×\(rendition.height)")
             case .mp3, .wav:
-                append("ℹ  Extrahiere Audio → \(rendition.name) (\(rendition.container.rawValue.uppercased())) …\n")
+                logInfo("\(rendition.name) wird erstellt", detail: rendition.container.rawValue.uppercased())
             }
             statusText = "Transkodiere \(rendition.name) · 0 %"
 
@@ -418,7 +460,7 @@ final class AppModel {
                                                deinterlace: deinterlace && rendition.container == .mp4,
                                                resolvedAudioCodec: resolvedAudio)
             args += ["-nostats", "-loglevel", "error", "-progress", "pipe:1", outFile]
-            append("$ ffmpeg \(args.joined(separator: " "))\n")
+            tech("$ ffmpeg \(args.joined(separator: " "))\n")
 
             let name = rendition.name
             let code = await ProcessRunner.ffmpegProgress(
@@ -431,19 +473,20 @@ final class AppModel {
                         self.updateStepProgress(stepIndex: stepIndex, stepCount: stepCount, inner: innerStage)
                     }
                 },
-                onStderr: logSink,
+                onStderr: techSink,
                 register: { currentProcess = $0 }
             )
             currentProcess = nil
             if code == 0 {
-                append("✓  Fertig → \(outFile)\n")
+                logSuccess("\(rendition.name) fertig", detail: fileSizeLabel(outFile), path: outFile)
             } else if cancelled {
-                append("⛔  \(rendition.name) abgebrochen\n")
+                logWarning("\(rendition.name) abgebrochen")
                 // Unvollständige Datei aufräumen
                 try? FileManager.default.removeItem(atPath: outFile)
                 break
             } else {
-                append("❌  Transkodierung (\(rendition.name)) exit \(code)\n")
+                tech("Transkodierung \(rendition.name): exit \(code)\n")
+                logError("\(rendition.name) fehlgeschlagen", detail: "Details im technischen Log")
             }
             updateStepProgress(
                 stepIndex: stepIndex, stepCount: stepCount,
@@ -462,11 +505,21 @@ final class AppModel {
         progress = (Double(stepIndex) + clamped) / Double(stepCount)
     }
 
+    /// Abschnittstrenner – nur im technischen Log.
     private func sep() {
-        append("/*──────────────────────────────────────────────────────*/\n")
+        tech("/*──────────────────────────────────────────────────────*/\n")
     }
 
     private func hms(_ total: Int) -> String {
         String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+    }
+
+    /// Lesbare Dateigröße, z.B. "12,4 MB".
+    private func fileSizeLabel(_ path: String) -> String? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let bytes = (attrs[.size] as? NSNumber)?.int64Value else { return nil }
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 1000 { return String(format: "%.2f GB", mb / 1024) }
+        return String(format: "%.1f MB", mb)
     }
 }

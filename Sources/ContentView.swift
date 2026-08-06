@@ -168,10 +168,17 @@ struct ContentView: View {
                 } label: {
                     Label("Log leeren", systemImage: "trash")
                 }
-                .disabled(model.log.isEmpty)
+                .disabled(model.entries.isEmpty)
             }
 
             Spacer()
+
+            Button {
+                NSWorkspace.shared.open(model.techLogDirectory)
+            } label: {
+                Label("Technisches Log", systemImage: "doc.text.magnifyingglass")
+            }
+            .help("Technische Logdateien im Finder öffnen (werden \(TechLog.retentionDays) Tage aufbewahrt)")
 
             Button {
                 model.showLog.toggle()
@@ -187,20 +194,37 @@ struct ContentView: View {
     private var logView: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                Text(model.log.isEmpty ? "Ausgabe erscheint hier…" : model.log)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(model.log.isEmpty ? .secondary : .primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .id("logContent")
+                if model.entries.isEmpty {
+                    VStack(spacing: 6) {
+                        Image(systemName: "text.alignleft")
+                            .font(.title3)
+                            .foregroundStyle(.quaternary)
+                        Text("Noch keine Aktivität")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 160)
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(model.entries) { entry in
+                            LogRowView(entry: entry)
+                                .id(entry.id)
+                        }
+                    }
+                    .padding(8)
+                }
             }
-            .background(Color.black.opacity(0.05))
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
             .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.primary.opacity(0.08))
+            )
             .frame(minHeight: 180)
-            .onChange(of: model.log) { _, _ in
+            .onChange(of: model.entries.count) { _, _ in
+                guard let last = model.entries.last else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("logContent", anchor: .bottom)
+                    proxy.scrollTo(last.id, anchor: .bottom)
                 }
             }
         }
@@ -243,6 +267,122 @@ struct ContentView: View {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 cont.resume(returning: url)
             }
+        }
+    }
+}
+
+// ============================================================================
+// Eine Zeile im Fenster-Log
+// ============================================================================
+
+private struct LogRowView: View {
+    let entry: LogEntry
+
+    var body: some View {
+        switch entry.kind {
+        case .header: headerRow
+        default:      standardRow
+        }
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "film")
+                .foregroundStyle(.tint)
+            Text(entry.text)
+                .font(.callout.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let detail = entry.detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            timestamp
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .padding(.top, 6)
+    }
+
+    private var standardRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(iconColor)
+                .font(.callout)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(entry.text)
+                    .font(.callout)
+                if let detail = entry.detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let path = entry.path {
+                    Text((path as NSString).abbreviatingWithTildeInPath)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 8)
+            if let path = entry.path {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Im Finder zeigen")
+            }
+            timestamp
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .contextMenu {
+            if let path = entry.path {
+                Button("Im Finder zeigen") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                }
+                Button("Pfad kopieren") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(path, forType: .string)
+                }
+            }
+        }
+    }
+
+    private var timestamp: some View {
+        Text(entry.date.formatted(date: .omitted, time: .standard))
+            .font(.caption2)
+            .monospacedDigit()
+            .foregroundStyle(.quaternary)
+    }
+
+    private var icon: String {
+        switch entry.kind {
+        case .header:  return "film"
+        case .info:    return "info.circle.fill"
+        case .success: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .error:   return "xmark.octagon.fill"
+        }
+    }
+
+    private var iconColor: AnyShapeStyle {
+        switch entry.kind {
+        case .header:  return AnyShapeStyle(.tint)
+        case .info:    return AnyShapeStyle(.secondary)
+        case .success: return AnyShapeStyle(.green)
+        case .warning: return AnyShapeStyle(.orange)
+        case .error:   return AnyShapeStyle(.red)
         }
     }
 }
