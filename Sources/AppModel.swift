@@ -24,16 +24,25 @@ final class AppModel {
     }
 
     var settings: TranscodeSettings {
-        didSet { settings.save() }
+        didSet { store.save(settings) }
     }
 
+    private let store: PresetStore
     private var currentProcess: Process?
     private var cancelled = false
 
     private static let targetFolderKey = "VideoTools.targetFolder"
 
     init() {
-        settings = TranscodeSettings.load()
+        let store = PresetStore()
+        self.store = store
+        var loaded = store.load()
+        // Auswahl normalisieren, falls das gespeicherte Preset weg/inaktiv ist.
+        if let fallback = loaded.selectedPreset, fallback.id != loaded.selectedPresetID {
+            loaded.selectedPresetID = fallback.id
+        }
+        self.settings = loaded
+
         if let s = UserDefaults.standard.string(forKey: Self.targetFolderKey), !s.isEmpty {
             let url = URL(fileURLWithPath: s)
             if FileManager.default.fileExists(atPath: url.path) {
@@ -50,11 +59,14 @@ final class AppModel {
         }
     }
 
-    /// Baut den Ausgabepfad auf Basis `<targetFolder | Quellordner>/<basename><suffix>`
-    private func outputPath(for input: URL, suffix: String) -> String {
-        let baseName = input.deletingPathExtension().lastPathComponent
+    /// Baut den Ausgabepfad `<targetFolder | Quellordner>/<fileName>`
+    private func outputPath(for input: URL, fileName: String) -> String {
         let dir = targetFolder?.path ?? input.deletingLastPathComponent().path
-        return "\(dir)/\(baseName)\(suffix)"
+        return "\(dir)/\(fileName)"
+    }
+
+    private func baseName(of input: URL) -> String {
+        input.deletingPathExtension().lastPathComponent
     }
 
     // -------------------------------------------------------------------
@@ -106,6 +118,12 @@ final class AppModel {
             return
         }
 
+        if mode.usesPreset, settings.selectedPreset == nil {
+            append("❌  Kein aktives Transcoding-Preset. In den Einstellungen (⌘,) ein Preset aktivieren.\n")
+            queue.removeAll()
+            return
+        }
+
         // Zielordner validieren / erzeugen
         if let dir = targetFolder {
             var isDir: ObjCBool = false
@@ -140,19 +158,17 @@ final class AppModel {
                 if cancelled { break }
                 await runStill(url, atSecond: 3, stepCount: 3, stepIndex: 1)
                 if cancelled { break }
-                await runEncode(url, presets: [settings.preset360, settings.preset720],
-                                stepCount: 3, stepIndex: 2)
+                if let preset = settings.selectedPreset {
+                    await runEncode(url, preset: preset, stepCount: 3, stepIndex: 2)
+                }
             case .info:
                 await runInfo(url, stepCount: 1, stepIndex: 0)
             case .still:
                 await runStill(url, atSecond: 3, stepCount: 1, stepIndex: 0)
-            case .encode360:
-                await runEncode(url, presets: [settings.preset360], stepCount: 1, stepIndex: 0)
-            case .encode720:
-                await runEncode(url, presets: [settings.preset720], stepCount: 1, stepIndex: 0)
-            case .encodeAll:
-                await runEncode(url, presets: [settings.preset360, settings.preset720],
-                                stepCount: 1, stepIndex: 0)
+            case .encode:
+                if let preset = settings.selectedPreset {
+                    await runEncode(url, preset: preset, stepCount: 1, stepIndex: 0)
+                }
             }
         }
 
@@ -235,8 +251,22 @@ final class AppModel {
         }()
 
         let df = DateFormatter(); df.dateFormat = "dd.MM.yyyy HH:mm:ss"
-        let est360 = Double(settings.preset360.videoBitrateKbps * 1000 * durSec) / 8 / 1_048_576
-        let est720 = Double(settings.preset720.videoBitrateKbps * 1000 * durSec) / 8 / 1_048_576
+
+        var estimateBlock = ""
+        if let preset = settings.selectedPreset {
+            var lines: [String] = []
+            for r in preset.renditions {
+                let kbps = r.estimatedBitrateKbps
+                let mb = Double(kbps) * 1000 * Double(durSec) / 8 / 1_048_576
+                lines.append("  \(r.name) (~\(kbps) kbps) : ~\(String(format: "%.2f", mb)) MB")
+            }
+            estimateBlock = """
+
+
+            [VORSCHAU-SCHÄTZUNGEN – Preset „\(preset.label)“]
+            \(lines.joined(separator: "\n"))
+            """
+        }
 
         let report = """
         ======================================
@@ -264,15 +294,11 @@ final class AppModel {
           Codec            : \((a?.codec_name ?? "").uppercased())
           Bitrate          : \((Int(a?.bit_rate ?? "0") ?? 0) / 1000) Kbps
           Samplerate       : \((Int(a?.sample_rate ?? "0") ?? 0) / 1000) KHz
-          Kanäle           : \(a?.channels ?? 0)
-
-        [VORSCHAU-SCHÄTZUNGEN (bei Transkodierung)]
-          360p (~\(settings.preset360.videoBitrateKbps) kbps) : ~\(String(format: "%.2f", est360)) MB
-          720p (~\(settings.preset720.videoBitrateKbps) kbps) : ~\(String(format: "%.2f", est720)) MB
+          Kanäle           : \(a?.channels ?? 0)\(estimateBlock)
         """
         append(report + "\n")
 
-        let outTxt = outputPath(for: input, suffix: "_metadata.txt")
+        let outTxt = outputPath(for: input, fileName: "\(baseName(of: input))_metadata.txt")
         do {
             try report.write(toFile: outTxt, atomically: true, encoding: .utf8)
             append("✓  Metadaten gespeichert → \(outTxt)\n")
@@ -284,11 +310,15 @@ final class AppModel {
 
     // ---- still ----------------------------------------------------------
 
-    private func runStill(_ input: URL, atSecond at: Int, stepCount: Int, stepIndex: Int) async {
-        sep(); append("ℹ  Extrahiere Stills bei \(at)s …\n")
+    private func runStill(_ input: URL, atSecond: Int, stepCount: Int, stepIndex: Int) async {
         guard let ffmpeg = Tools.locate("ffmpeg") else {
             append("❌  ffmpeg nicht gefunden.\n"); return
         }
+        // Bei sehr kurzen Clips läge der Zeitpunkt hinter dem letzten Frame.
+        var at = Double(atSecond)
+        let duration = (await probeVideo(input)).duration
+        if duration > 0, at >= duration { at = duration / 2 }
+        sep(); append("ℹ  Extrahiere Stills bei \(String(format: "%.1f", at))s …\n")
         let sizes: [(String, String)] = [
             ("small",  "320:180"),
             ("medium", "640:360"),
@@ -297,9 +327,9 @@ final class AppModel {
         for (idx, (label, size)) in sizes.enumerated() {
             if cancelled { break }
             statusText = "Still \(label)"
-            let outPath = outputPath(for: input, suffix: "_still_\(label).jpg")
+            let outPath = outputPath(for: input, fileName: "\(baseName(of: input))_still_\(label).jpg")
             let args = [
-                "-ss", "\(at)", "-i", input.path,
+                "-ss", String(format: "%.2f", at), "-i", input.path,
                 "-frames:v", "1",
                 "-vf", "scale=\(size):force_original_aspect_ratio=decrease",
                 "-q:v", "5", "-y", outPath,
@@ -319,7 +349,7 @@ final class AppModel {
         sep()
     }
 
-    // ---- encode (Standard-Pipeline, mit Progress-Parsing) ----------------
+    // ---- encode (Preset mit Renditions, mit Progress-Parsing) ------------
 
     private func resolveAudioCodec() async -> String {
         switch settings.audioCodec {
@@ -336,50 +366,68 @@ final class AppModel {
         }
     }
 
-    private func runEncode(_ input: URL, presets: [TranscodePreset], stepCount: Int, stepIndex: Int) async {
+    private func runEncode(_ input: URL, preset: TranscodePreset, stepCount: Int, stepIndex: Int) async {
         guard let ffmpeg = Tools.locate("ffmpeg") else {
             append("❌  ffmpeg nicht gefunden.\n"); return
         }
-        sep(); append("ℹ  Starte Transkodierung von: \(input.lastPathComponent)\n")
+        guard !preset.renditions.isEmpty else {
+            append("⚠  Preset „\(preset.label)“ hat keine Renditions – nichts zu tun.\n")
+            return
+        }
+        sep(); append("ℹ  Starte Transkodierung: \(input.lastPathComponent)\n")
+        append("ℹ  Preset: \(preset.label)\n")
 
         let probe = await probeVideo(input)
         if probe.duration <= 0 { append("⚠  Dauer unbekannt – Fortschritt indeterminate.\n") }
 
-        let deinterlace: Bool
-        switch settings.deinterlace {
-        case .off:    deinterlace = false
-        case .always: deinterlace = true
-        case .auto:   deinterlace = probe.isInterlaced
-        }
-        if deinterlace {
-            append("ℹ  Deinterlacing aktiv (yadif).\n")
+        let hasVideoRenditions = preset.renditions.contains { $0.container == .mp4 }
+
+        var deinterlace = false
+        if hasVideoRenditions {
+            switch settings.deinterlace {
+            case .off:    deinterlace = false
+            case .always: deinterlace = true
+            case .auto:   deinterlace = probe.isInterlaced
+            }
+            if deinterlace {
+                append("ℹ  Deinterlacing aktiv (yadif).\n")
+            }
         }
 
-        let audioCodec = await resolveAudioCodec()
-        append("ℹ  Audio-Codec: \(audioCodec)\n")
+        let resolvedAudio = hasVideoRenditions ? await resolveAudioCodec() : "aac"
+        if hasVideoRenditions {
+            append("ℹ  Audio-Codec (MP4): \(resolvedAudio)\n")
+        }
 
-        for (qIdx, preset) in presets.enumerated() {
+        let renditionCount = preset.renditions.count
+        for (rIdx, rendition) in preset.renditions.enumerated() {
             if cancelled { break }
-            let outFile = outputPath(for: input, suffix: "\(preset.suffix).mp4")
+            let fileName = preset.outputFileName(base: baseName(of: input), rendition: rendition)
+            let outFile = outputPath(for: input, fileName: fileName)
 
-            sep(); append("ℹ  Transkodiere → \(preset.name) (\(preset.scaleDescription)) …\n")
-            statusText = "Transkodiere \(preset.name) · 0 %"
+            sep()
+            switch rendition.container {
+            case .mp4:
+                append("ℹ  Transkodiere → \(rendition.name) (\(rendition.scaleDescription)) …\n")
+            case .mp3, .wav:
+                append("ℹ  Extrahiere Audio → \(rendition.name) (\(rendition.container.rawValue.uppercased())) …\n")
+            }
+            statusText = "Transkodiere \(rendition.name) · 0 %"
 
-            var args = preset.coreArguments(input: input.path,
-                                            deinterlace: deinterlace,
-                                            audioCodec: audioCodec)
+            var args = rendition.coreArguments(input: input.path,
+                                               deinterlace: deinterlace && rendition.container == .mp4,
+                                               resolvedAudioCodec: resolvedAudio)
             args += ["-nostats", "-loglevel", "error", "-progress", "pipe:1", outFile]
             append("$ ffmpeg \(args.joined(separator: " "))\n")
 
-            let name = preset.name
-            let presetCount = presets.count
+            let name = rendition.name
             let code = await ProcessRunner.ffmpegProgress(
                 ffmpeg, args: args, duration: probe.duration,
                 onProgress: { [weak self] pct in
                     Task { @MainActor in
                         guard let self else { return }
                         self.statusText = "Transkodiere \(name) · \(Int(pct * 100)) %"
-                        let innerStage = Double(qIdx) / Double(presetCount) + (pct / Double(presetCount))
+                        let innerStage = Double(rIdx) / Double(renditionCount) + (pct / Double(renditionCount))
                         self.updateStepProgress(stepIndex: stepIndex, stepCount: stepCount, inner: innerStage)
                     }
                 },
@@ -390,16 +438,16 @@ final class AppModel {
             if code == 0 {
                 append("✓  Fertig → \(outFile)\n")
             } else if cancelled {
-                append("⛔  \(preset.name) abgebrochen\n")
+                append("⛔  \(rendition.name) abgebrochen\n")
                 // Unvollständige Datei aufräumen
                 try? FileManager.default.removeItem(atPath: outFile)
                 break
             } else {
-                append("❌  Transkodierung (\(preset.name)) exit \(code)\n")
+                append("❌  Transkodierung (\(rendition.name)) exit \(code)\n")
             }
             updateStepProgress(
                 stepIndex: stepIndex, stepCount: stepCount,
-                inner: Double(qIdx + 1) / Double(presets.count)
+                inner: Double(rIdx + 1) / Double(renditionCount)
             )
         }
         sep()

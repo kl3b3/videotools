@@ -69,7 +69,7 @@ struct ContentView: View {
 
     private var header: some View {
         @Bindable var model = model
-        return HStack(spacing: 12) {
+        return HStack(alignment: .top, spacing: 12) {
             Image(systemName: "film.stack")
                 .font(.system(size: 26))
                 .foregroundStyle(.tint)
@@ -79,11 +79,24 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Picker("Modus", selection: $model.mode) {
-                ForEach(Mode.allCases) { m in Text(m.label).tag(m) }
+            VStack(alignment: .trailing, spacing: 6) {
+                Picker("Aufgabe", selection: $model.mode) {
+                    ForEach(Mode.allCases) { m in Text(m.label).tag(m) }
+                }
+                .pickerStyle(.menu)
+                if model.mode.usesPreset {
+                    Picker("Preset", selection: Binding(
+                        get: { model.settings.selectedPreset?.id ?? "" },
+                        set: { model.settings.selectedPresetID = $0 }
+                    )) {
+                        ForEach(model.settings.activePresets) { p in
+                            Text(p.label).tag(p.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
             }
-            .pickerStyle(.menu)
-            .frame(maxWidth: 320)
+            .frame(maxWidth: 360)
             .disabled(model.isRunning)
         }
     }
