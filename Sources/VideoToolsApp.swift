@@ -22,12 +22,36 @@ struct VideoToolsApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static weak var sharedModel: AppModel?
+    /// Beim Kaltstart mit Dokument feuert das open-Event, bevor SwiftUI das
+    /// Fenster aufgebaut hat – bis dahin werden URLs hier zwischengepuffert.
+    static weak var sharedModel: AppModel? {
+        didSet {
+            if let model = sharedModel, !pendingURLs.isEmpty {
+                model.enqueue(pendingURLs)
+                pendingURLs.removeAll()
+            }
+        }
+    }
+    private static var pendingURLs: [URL] = []
 
+    private static func deliver(_ urls: [URL]) {
+        if let model = sharedModel {
+            model.enqueue(urls)
+        } else {
+            pendingURLs.append(contentsOf: urls)
+        }
+    }
+
+    /// Moderner Weg (Finder „Öffnen mit“, Drag aufs Dock-Icon, `open -a`).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        Self.deliver(urls)
+    }
+
+    /// Legacy-Fallback für ältere LaunchServices-Pfade.
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        let urls = filenames.map { URL(fileURLWithPath: $0) }
-        Task { @MainActor in AppDelegate.sharedModel?.enqueue(urls) }
+        Self.deliver(filenames.map { URL(fileURLWithPath: $0) })
         sender.reply(toOpenOrPrint: .success)
     }
 }

@@ -24,11 +24,23 @@ else
     echo "    ⚠ Kein Icon gefunden unter $ICON_SRC"
 fi
 
+# SDK wählen: Das macOS-27-SDK der CommandLineTools deklariert SwiftUI-
+# Property-Wrapper als Macros, liefert das SwiftUIMacros-Plugin aber nicht
+# mit (nur Xcode tut das) – damit scheitert jeder swiftc-Build. Solange kein
+# volles Xcode installiert ist, aufs 26er-SDK pinnen, falls vorhanden.
+SDK_ARGS=()
+SDK26="/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
+if [[ -d "$SDK26" ]]; then
+    SDK_ARGS=(-sdk "$SDK26")
+    echo "▶ SDK: $SDK26"
+fi
+
 echo "▶ Kompiliere Sources/*.swift → $BIN"
 swiftc \
   -O \
   -target arm64-apple-macos14 \
   -parse-as-library \
+  "${SDK_ARGS[@]}" \
   -o "$BIN" \
   "$HERE/Sources/"*.swift
 chmod +x "$BIN"
