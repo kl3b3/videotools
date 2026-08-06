@@ -194,16 +194,30 @@ private struct PresetEditorView: View {
                 TextField("Basissuffix", text: $preset.baseSuffix)
                     .font(.system(.body, design: .monospaced))
                 ForEach(preset.renditions) { r in
+                    let isDuplicate = duplicateKeys.contains(preset.outputKey(r))
                     LabeledContent(r.name) {
-                        Text(preset.outputFileName(base: "clip", rendition: r))
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            if isDuplicate {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.red)
+                                    .help("Dieser Dateiname kommt mehrfach vor")
+                            }
+                            Text(preset.outputFileName(base: "clip", rendition: r))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(isDuplicate ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                        }
                     }
                 }
             } header: {
                 Text("Dateinamen")
             } footer: {
-                Text("Ausgabename = <Dateiname><Basissuffix><Rendition-Suffix>.<Endung>")
+                if duplicateKeys.isEmpty {
+                    Text("Ausgabename = <Dateiname><Basissuffix><Rendition-Suffix>.<Endung>")
+                } else {
+                    Label("Mehrere Renditions erzeugen denselben Dateinamen – beim Transkodieren wird nur die erste erstellt, die weiteren werden übersprungen. Suffixe eindeutig machen!",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                }
             }
 
             Section {
@@ -255,6 +269,8 @@ private struct PresetEditorView: View {
         }
         .formStyle(.grouped)
     }
+
+    private var duplicateKeys: Set<String> { preset.duplicateOutputKeys }
 
     private func renditionSummary(_ r: Rendition) -> String {
         switch r.container {
