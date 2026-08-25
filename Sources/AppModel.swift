@@ -314,7 +314,6 @@ final class AppModel {
         let durSec   = Int(Double(probe.format.duration ?? "0") ?? 0)
         let overall  = Int(probe.format.bit_rate ?? "0") ?? 0
         let filesize = Int64(probe.format.size ?? "0") ?? 0
-        let sizeMB   = Double(filesize) / 1_048_576.0
 
         let v = probe.streams.first(where: { $0.codec_type == "video" })
         let a = probe.streams.first(where: { $0.codec_type == "audio" })
@@ -332,8 +331,8 @@ final class AppModel {
 
         let df = DateFormatter(); df.dateFormat = "dd.MM.yyyy HH:mm:ss"
 
-        func estMB(_ kbps: Int) -> String {
-            String(format: "%.0f", Double(kbps) * 1000 * Double(durSec) / 8 / 1_048_576)
+        func estSize(_ kbps: Int) -> String {
+            sizeLabel(bytes: Int64(Double(kbps) * 1000.0 * Double(durSec) / 8.0))
         }
         var estimateBlock = ""
         if let preset = settings.selectedPreset, durSec > 0 {
@@ -341,18 +340,18 @@ final class AppModel {
             for r in preset.renditions {
                 switch r.container {
                 case .mp3, .wav:
-                    lines.append("  \(r.name) : ~\(estMB(r.estimatedBitrateKbps)) MB")
+                    lines.append("  \(r.name) : ~\(estSize(r.estimatedBitrateKbps))")
                 case .mp4:
                     let audio = r.audioBitrateKbps
                     switch r.rateControl {
                     case .cbr:
-                        var line = "  \(r.name) (CBR \(r.videoBitrateKbps) kbps) : ~\(estMB(r.videoBitrateKbps + audio)) MB"
+                        var line = "  \(r.name) (CBR \(r.videoBitrateKbps) kbps) : ~\(estSize(r.videoBitrateKbps + audio))"
                         if overall > 0, overall / 1000 < r.videoBitrateKbps {
                             line += "\n    Achtung: Quelle liefert nur \(overall / 1000) kbps – die Ausgabe kann größer werden als die Quelldatei."
                         }
                         lines.append(line)
                     case .cappedCRF:
-                        lines.append("  \(r.name) (CRF \(r.crf), Deckel \(r.maxrateKbps) kbps) : höchstens ~\(estMB(r.maxrateKbps + audio)) MB, je nach Material meist deutlich weniger")
+                        lines.append("  \(r.name) (CRF \(r.crf), Deckel \(r.maxrateKbps) kbps) : höchstens ~\(estSize(r.maxrateKbps + audio)), je nach Material meist deutlich weniger")
                     case .crf:
                         lines.append("  \(r.name) (CRF \(r.crf), ohne Deckel) : stark materialabhängig, keine verlässliche Schätzung")
                     }
@@ -378,7 +377,7 @@ final class AppModel {
         [ALLGEMEIN]
           Format           : \(probe.format.format_long_name ?? "")
           Dateiendung      : \(input.pathExtension.uppercased())
-          Dateigröße       : \(String(format: "%.2f", sizeMB)) MB
+          Dateigröße       : \(sizeLabel(bytes: filesize))
           Dauer (h:m:s)    : \(hms(durSec))
           Gesamt-Bitrate   : \(overall / 1000) Kbps
 
@@ -400,7 +399,7 @@ final class AppModel {
 
         // Kompakte, verständliche Zusammenfassung fürs Fenster
         let codec = (v?.codec_name ?? "?").uppercased()
-        let summary = "\(v?.width ?? 0)×\(v?.height ?? 0) · \(fps) fps · \(hms(durSec)) · \(codec) · \(String(format: "%.1f", sizeMB)) MB · \(scan)"
+        let summary = "\(v?.width ?? 0)×\(v?.height ?? 0) · \(fps) fps · \(hms(durSec)) · \(codec) · \(sizeLabel(bytes: filesize)) · \(scan)"
 
         let outTxt = outputPath(for: input, fileName: "\(baseName(of: input))_metadata.txt")
         do {
@@ -680,11 +679,16 @@ final class AppModel {
         return bytes
     }
 
-    /// Lesbare Dateigröße, z.B. "12,4 MB" oder "1,29 GB".
+    /// Formatiert wie der Finder: dezimal (1 GB = 1000³ Bytes), lokalisiert.
+    private static let byteFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.countStyle = .file
+        return f
+    }()
+
+    /// Lesbare Dateigröße in Finder-Schreibweise, z.B. "549,3 MB" oder "1,93 GB".
     private func sizeLabel(bytes: Int64) -> String {
-        let mb = Double(bytes) / 1_048_576
-        if mb >= 1000 { return String(format: "%.2f GB", mb / 1024) }
-        return String(format: "%.1f MB", mb)
+        Self.byteFormatter.string(fromByteCount: bytes)
     }
 
     private func fileSizeLabel(_ path: String) -> String? {
