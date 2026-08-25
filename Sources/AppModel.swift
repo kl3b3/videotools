@@ -123,9 +123,39 @@ final class AppModel {
         statusText = "Abbrechen …"
     }
 
+    /// Letzte stderr-Ausgabe des aktuellen Tool-Aufrufs (für Fehlerdiagnose).
+    private var recentToolOutput = ""
+
     /// Streamt Tool-Ausgaben (stderr etc.) ins technische Log (von beliebigem Thread aus).
     private var techSink: @Sendable (String) -> Void {
-        { [weak self] s in Task { @MainActor in self?.tech(s) } }
+        { [weak self] s in
+            Task { @MainActor in
+                guard let self else { return }
+                self.tech(s)
+                self.recentToolOutput = String((self.recentToolOutput + s).suffix(4000))
+            }
+        }
+    }
+
+    /// Puffer leeren und Prozess für „Abbrechen“ registrieren.
+    private func registerProcess(_ p: Process) {
+        recentToolOutput = ""
+        currentProcess = p
+    }
+
+    /// Verständliche Fehlerursache, falls aus der stderr-Ausgabe erkennbar –
+    /// insbesondere dyld-Ladefehler, wenn gebündelte Bibliotheken ein neueres
+    /// macOS verlangen als das laufende System.
+    private var failureHint: String {
+        if recentToolOutput.contains("Bad CPU type") {
+            return "Das Kompatibilitäts-ffmpeg benötigt Rosetta 2. Im Terminal installieren: softwareupdate --install-rosetta"
+        }
+        if recentToolOutput.contains("Symbol not found")
+            || recentToolOutput.contains("newer than running OS")
+            || recentToolOutput.contains("Library not loaded") {
+            return "Die gebündelten ffmpeg-Bibliotheken benötigen ein neueres macOS als dieses System. macOS aktualisieren – oder die App auf diesem System neu bauen."
+        }
+        return "Details im technischen Log"
     }
 
     // -------------------------------------------------------------------
@@ -144,11 +174,28 @@ final class AppModel {
             cancelled = false
         }
 
-        if Tools.locate("ffmpeg") == nil || Tools.locate("ffprobe") == nil {
+        if Tools.candidates("ffmpeg").isEmpty || Tools.candidates("ffprobe").isEmpty {
             logError("ffmpeg/ffprobe nicht gefunden.",
                      detail: "Mit „brew install ffmpeg“ installieren – oder im Bundle bereitstellen.")
             queue.removeAll()
             return
+        }
+
+        // Funktionierendes ffmpeg/ffprobe ermitteln. Probiert die Kandidaten in
+        // Reihenfolge (Bundle nativ → Homebrew/System → statisches
+        // Kompatibilitäts-Binary) und fängt dyld-Fehler EINMAL sauber ab, statt
+        // dass jede Aufgabe einzeln mit einem kryptischen Crash scheitert.
+        recentToolOutput = ""
+        guard let ffmpegURL = await Tools.locateWorking("ffmpeg", onStderr: techSink),
+              let ffprobeURL = await Tools.locateWorking("ffprobe", onStderr: techSink) else {
+            logError("ffmpeg kann auf diesem System nicht gestartet werden.", detail: failureHint)
+            queue.removeAll()
+            return
+        }
+        tech("Verwende ffmpeg:  \(ffmpegURL.path)\nVerwende ffprobe: \(ffprobeURL.path)\n")
+        if Tools.isCompat(ffmpegURL) {
+            logInfo("Kompatibilitätsmodus: statisches ffmpeg wird verwendet",
+                    detail: "Das native ffmpeg lädt auf diesem System nicht. Auf Apple-Silicon-Macs läuft die Transkodierung dadurch etwas langsamer (Rosetta).")
         }
 
         if mode.usesPreset, settings.selectedPreset == nil {
@@ -234,7 +281,7 @@ final class AppModel {
             "-show_entries", "format=duration",
             "-of", "json",
             url.path
-        ], onStderr: techSink, register: { currentProcess = $0 })
+        ], onStderr: techSink, register: { registerProcess($0) })
         currentProcess = nil
         guard let data, let p = try? JSONDecoder().decode(ProbeSummary.self, from: data) else {
             return (0, false)
@@ -258,10 +305,10 @@ final class AppModel {
         let (data, _) = await ProcessRunner.capture(ffprobe, args: [
             "-v", "quiet", "-print_format", "json",
             "-show_format", "-show_streams", input.path
-        ], onStderr: techSink, register: { currentProcess = $0 })
+        ], onStderr: techSink, register: { registerProcess($0) })
         currentProcess = nil
         guard let data, let probe = try? JSONDecoder().decode(FFProbeOutput.self, from: data) else {
-            logError("Metadaten konnten nicht gelesen werden", detail: "Details im technischen Log"); return
+            logError("Metadaten konnten nicht gelesen werden", detail: failureHint); return
         }
 
         let durSec   = Int(Double(probe.format.duration ?? "0") ?? 0)
@@ -375,13 +422,13 @@ final class AppModel {
             ]
             tech("$ ffmpeg \(args.joined(separator: " "))\n")
             let code = await ProcessRunner.live(ffmpeg, args: args, onLog: techSink,
-                                                register: { currentProcess = $0 })
+                                                register: { registerProcess($0) })
             currentProcess = nil
             if code == 0 {
                 logSuccess("Vorschaubild \(label)", path: outPath)
             } else {
                 tech("Still \(label): exit \(code)\n")
-                logWarning("Vorschaubild \(label) fehlgeschlagen", detail: "Details im technischen Log")
+                logWarning("Vorschaubild \(label) fehlgeschlagen", detail: failureHint)
             }
             let inner = Double(idx + 1) / Double(sizes.count)
             updateStepProgress(stepIndex: stepIndex, stepCount: stepCount, inner: inner)
@@ -493,7 +540,7 @@ final class AppModel {
                     }
                 },
                 onStderr: techSink,
-                register: { currentProcess = $0 }
+                register: { registerProcess($0) }
             )
             currentProcess = nil
             if code == 0 {
@@ -505,7 +552,7 @@ final class AppModel {
                 break
             } else {
                 tech("Transkodierung \(rendition.name): exit \(code)\n")
-                logError("\(rendition.name) fehlgeschlagen", detail: "Details im technischen Log")
+                logError("\(rendition.name) fehlgeschlagen", detail: failureHint)
             }
             updateStepProgress(
                 stepIndex: stepIndex, stepCount: stepCount,

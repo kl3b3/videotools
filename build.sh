@@ -35,14 +35,23 @@ if [[ -d "$SDK26" ]]; then
     echo "▶ SDK: $SDK26"
 fi
 
-echo "▶ Kompiliere Sources/*.swift → $BIN"
+echo "▶ Kompiliere Sources/*.swift → $BIN (universal: arm64 + x86_64)"
 swiftc \
   -O \
   -target arm64-apple-macos14 \
   -parse-as-library \
   "${SDK_ARGS[@]}" \
-  -o "$BIN" \
+  -o "$BIN.arm64" \
   "$HERE/Sources/"*.swift
+swiftc \
+  -O \
+  -target x86_64-apple-macos14 \
+  -parse-as-library \
+  "${SDK_ARGS[@]}" \
+  -o "$BIN.x86_64" \
+  "$HERE/Sources/"*.swift
+lipo -create "$BIN.arm64" "$BIN.x86_64" -output "$BIN"
+rm "$BIN.arm64" "$BIN.x86_64"
 chmod +x "$BIN"
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -146,6 +155,60 @@ echo "▶ Bündle ffmpeg/ffprobe + alle dynamischen Abhängigkeiten"
 bundle_tool ffmpeg
 bundle_tool ffprobe
 
+# ─────────────────────────────────────────────────────────────────────────
+# Statisches Kompatibilitäts-ffmpeg (x86_64, ab macOS 10.13) bündeln.
+# Quelle: Release-Builds von https://evermeet.cx/ffmpeg/ – statisch gelinkt,
+# keine Dylib-Abhängigkeiten. Läuft auf Intel-Macs nativ und auf Apple
+# Silicon via Rosetta. Die App nutzt es nur, wenn das native ffmpeg nicht
+# lädt (z.B. weil die Homebrew-Dylibs ein neueres macOS verlangen).
+# Aktualisieren: neue Builds nach vendor/ffmpeg-static/ legen.
+# ─────────────────────────────────────────────────────────────────────────
+COMPAT_SRC="$HERE/vendor/ffmpeg-static"
+COMPAT_BUNDLED=0
+if [[ -x "$COMPAT_SRC/ffmpeg" && -x "$COMPAT_SRC/ffprobe" ]]; then
+    mkdir -p "$RES/compat"
+    cp "$COMPAT_SRC/ffmpeg" "$COMPAT_SRC/ffprobe" "$RES/compat/"
+    chmod +x "$RES/compat/ffmpeg" "$RES/compat/ffprobe"
+    COMPAT_BUNDLED=1
+    echo "▶ Statisches Kompatibilitäts-ffmpeg gebündelt (x86_64, ab macOS 10.13)"
+else
+    echo "▶ ⚠ vendor/ffmpeg-static/ fehlt – ohne Rückfallebene bestimmt das"
+    echo "    macOS der Homebrew-Bibliotheken die Mindestversion der App."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# Echtes Mindest-macOS des Bundles ermitteln. Homebrew-Binaries verlangen
+# oft ein neueres macOS als das App-Target (minos in LC_BUILD_VERSION);
+# auf älteren Systemen stürzt sonst jeder ffmpeg-Aufruf mit einem rohen
+# dyld-Fehler ab. OHNE Kompatibilitäts-ffmpeg wird das höchste minos aller
+# gebündelten Binaries in die Info.plist geschrieben – ältere Systeme
+# zeigen dann eine klare "benötigt macOS X"-Meldung statt zu crashen.
+# MIT Kompatibilitäts-ffmpeg bleibt es beim App-Minimum (14.0), weil die
+# Rückfallebene ältere Systeme abdeckt.
+# ─────────────────────────────────────────────────────────────────────────
+MIN_OS="14.0"   # muss zum swiftc-Target (arm64-apple-macos14) passen
+MAX_MINOS="$MIN_OS"
+MAX_MINOS_FILE=""
+for f in "$LIBS"/*.dylib "$RES/ffmpeg" "$RES/ffprobe"; do
+    [[ -f "$f" ]] || continue
+    minos=$(otool -l "$f" 2>/dev/null | awk '/LC_BUILD_VERSION/{found=1} found && /minos/{print $2; exit}')
+    [[ -z "$minos" ]] && continue
+    if [[ "$(printf '%s\n%s\n' "$MAX_MINOS" "$minos" | sort -V | tail -1)" == "$minos" && "$minos" != "$MAX_MINOS" ]]; then
+        MAX_MINOS="$minos"
+        MAX_MINOS_FILE="$(basename "$f")"
+    fi
+done
+if [[ "$MAX_MINOS" != "$MIN_OS" ]]; then
+    if [[ "$COMPAT_BUNDLED" -eq 1 ]]; then
+        echo "▶ Natives ffmpeg verlangt macOS ≥ $MAX_MINOS (z.B. $MAX_MINOS_FILE);"
+        echo "    ältere Systeme nutzen automatisch das Kompatibilitäts-ffmpeg."
+    else
+        /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $MAX_MINOS" "$APP/Contents/Info.plist"
+        echo "▶ ⚠ Gebündelte Bibliotheken verlangen macOS ≥ $MAX_MINOS (z.B. $MAX_MINOS_FILE)"
+        echo "    → LSMinimumSystemVersion im Bundle auf $MAX_MINOS gesetzt."
+    fi
+fi
+
 # Ad-hoc Signatur (rekursiv, damit auch Frameworks/*.dylib signiert sind)
 echo "▶ Ad-hoc codesign (rekursiv)"
 # Zuerst innere Libs signieren, dann das Bundle
@@ -153,6 +216,8 @@ find "$LIBS" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 2>/dev/null |
     xargs -0 -I{} codesign --force --sign - --timestamp=none {} 2>/dev/null || true
 codesign --force --sign - "$RES/ffmpeg"  2>/dev/null || true
 codesign --force --sign - "$RES/ffprobe" 2>/dev/null || true
+codesign --force --sign - "$RES/compat/ffmpeg"  2>/dev/null || true
+codesign --force --sign - "$RES/compat/ffprobe" 2>/dev/null || true
 codesign --force --deep --sign - "$APP"  2>/dev/null || true
 
 du -sh "$APP" | awk '{print "▶ Bundle-Größe: "$1}'

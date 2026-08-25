@@ -6,27 +6,67 @@ import Foundation
 
 @MainActor
 enum Tools {
-    private static var cache: [String: URL] = [:]
+    /// Kandidaten, die auf diesem System nachweislich starten (per `-version`).
+    private static var workingCache: [String: URL] = [:]
     private static var encoderCache: Set<String>?
 
+    /// Schnelle, synchrone Suche (für UI-Statusanzeige). Nach dem ersten
+    /// erfolgreichen `locateWorking` liefert sie dessen Ergebnis.
     static func locate(_ name: String) -> URL? {
-        if let hit = cache[name] { return hit }
-        if let found = search(name) {
-            cache[name] = found
-            return found
+        if let working = workingCache[name] { return working }
+        return candidates(name).first
+    }
+
+    /// Alle denkbaren Orte für ein Tool, in Präferenz-Reihenfolge:
+    /// 1. App-Bundle (natives Homebrew-Bundling – schnellster Pfad)
+    /// 2. Homebrew-/System-Installation des Nutzers (nativ)
+    /// 3. Statisches Kompatibilitäts-Binary im Bundle (x86_64, ab macOS 10.13;
+    ///    auf Apple Silicon via Rosetta) – Rückfallebene für ältere Systeme,
+    ///    deren libc++ die gebündelten Homebrew-Dylibs nicht laden kann.
+    static func candidates(_ name: String) -> [URL] {
+        var list: [URL] = []
+        if let bundled = Bundle.main.url(forResource: name, withExtension: nil),
+           FileManager.default.isExecutableFile(atPath: bundled.path) {
+            list.append(bundled)
+        }
+        for p in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"]
+        where FileManager.default.isExecutableFile(atPath: p) {
+            list.append(URL(fileURLWithPath: p))
+        }
+        if let fromPath = which(name) { list.append(fromPath) }
+        if let compat = Bundle.main.url(forResource: name, withExtension: nil, subdirectory: "compat"),
+           FileManager.default.isExecutableFile(atPath: compat.path) {
+            list.append(compat)
+        }
+        // Duplikate (z.B. which == Homebrew) entfernen, Reihenfolge erhalten
+        var seen = Set<String>()
+        return list.filter { seen.insert($0.path).inserted }
+    }
+
+    static func isCompat(_ url: URL) -> Bool {
+        url.path.contains("/compat/")
+    }
+
+    /// Erster Kandidat, der auf diesem System tatsächlich startet.
+    /// Fehlermeldungen gescheiterter Kandidaten (z.B. dyld) gehen an `onStderr`.
+    static func locateWorking(
+        _ name: String,
+        onStderr: @escaping @Sendable (String) -> Void = { _ in }
+    ) async -> URL? {
+        if let cached = workingCache[name] { return cached }
+        for candidate in candidates(name) {
+            let (_, code) = await ProcessRunner.capture(candidate, args: ["-version"],
+                                                        onStderr: onStderr)
+            if code == 0 {
+                workingCache[name] = candidate
+                return candidate
+            }
+            onStderr("Kandidat startet nicht (exit \(code)): \(candidate.path)\n")
         }
         return nil
     }
 
-    private static func search(_ name: String) -> URL? {
-        if let bundled = Bundle.main.url(forResource: name, withExtension: nil),
-           FileManager.default.isExecutableFile(atPath: bundled.path) {
-            return bundled
-        }
-        for p in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"]
-        where FileManager.default.isExecutableFile(atPath: p) {
-            return URL(fileURLWithPath: p)
-        }
+    private static func which(_ name: String) -> URL? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         proc.arguments = [name]
@@ -44,10 +84,11 @@ enum Tools {
         return nil
     }
 
-    /// Prüft (einmalig, gecacht), ob der ffmpeg-Build einen Encoder mitbringt.
+    /// Prüft (einmalig, gecacht), ob der tatsächlich genutzte ffmpeg-Build
+    /// einen Encoder mitbringt.
     static func hasEncoder(_ name: String) async -> Bool {
         if let cached = encoderCache { return cached.contains(name) }
-        guard let ffmpeg = locate("ffmpeg") else { return false }
+        guard let ffmpeg = await locateWorking("ffmpeg") else { return false }
         let (data, _) = await ProcessRunner.capture(ffmpeg, args: ["-hide_banner", "-encoders"])
         var names = Set<String>()
         if let data, let text = String(data: data, encoding: .utf8) {
