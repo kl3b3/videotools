@@ -587,32 +587,73 @@ final class AppModel {
         if !cancelled, !completed.isEmpty {
             statusText = "Prüfe Dateigrößen …"
             var parts: [String] = []
+            var txtLines: [String] = []
             var totalBytes: Int64 = 0
             for item in completed {
                 let bytes = fileSizeBytes(item.path) ?? 0
                 totalBytes += bytes
                 parts.append("\(item.name): \(sizeLabel(bytes: bytes))")
+                var note = ""
                 if bytes == 0 {
                     logWarning("\(item.name) ist leer (0 Bytes)", detail: "Datei prüfen: \(item.path)")
-                    continue
-                }
-                if probe.duration > 0 {
+                    note = "  ⚠ LEER"
+                } else if probe.duration > 0 {
                     let outDuration = (await probeVideo(URL(fileURLWithPath: item.path))).duration
                     if outDuration > 0, abs(outDuration - probe.duration) > 2 {
                         logWarning("\(item.name) hat eine abweichende Länge",
                                    detail: "\(hms(Int(outDuration))) statt \(hms(Int(probe.duration))) – Datei prüfen")
+                        note = "  ⚠ Länge \(hms(Int(outDuration))) statt \(hms(Int(probe.duration)))"
                     }
                 }
+                txtLines.append("  \(item.name) : \(sizeLabel(bytes: bytes))\(note)  → \(item.path)")
             }
             var detail = parts.joined(separator: " · ")
             detail += " — gesamt \(sizeLabel(bytes: totalBytes))"
             if let sourceBytes = fileSizeBytes(input.path) {
                 detail += ", Quelle \(sizeLabel(bytes: sourceBytes))"
             }
+            let metadataPath = appendResultToMetadata(for: input, preset: preset,
+                                                      lines: txtLines, totalBytes: totalBytes)
             let count = completed.count
-            logSuccess("Dateigrößen geprüft (\(count) Datei\(count == 1 ? "" : "en"))", detail: detail)
+            logSuccess("Dateigrößen geprüft (\(count) Datei\(count == 1 ? "" : "en"))",
+                       detail: detail, path: metadataPath)
         }
         sep()
+    }
+
+    /// Hängt das Transcoding-Ergebnis an die vorhandene `_metadata.txt` an.
+    /// Gibt den Pfad der Datei zurück, wenn geschrieben wurde.
+    private func appendResultToMetadata(for input: URL, preset: TranscodePreset,
+                                        lines: [String], totalBytes: Int64) -> String? {
+        let txtPath = outputPath(for: input, fileName: "\(baseName(of: input))_metadata.txt")
+        guard var content = try? String(contentsOfFile: txtPath, encoding: .utf8) else {
+            tech("Keine Metadaten-Datei vorhanden – Transcoding-Ergebnis nicht angehängt (\(txtPath)).\n")
+            return nil
+        }
+        let df = DateFormatter(); df.dateFormat = "dd.MM.yyyy HH:mm:ss"
+        var block = """
+
+
+        ======================================
+          TRANSCODING-ERGEBNIS
+          Preset : \(preset.label)
+          Datum  : \(df.string(from: Date()))
+        ======================================
+        \(lines.joined(separator: "\n"))
+          Gesamt : \(sizeLabel(bytes: totalBytes))
+        """
+        if let sourceBytes = fileSizeBytes(input.path) {
+            block += " (Quelle: \(sizeLabel(bytes: sourceBytes)))"
+        }
+        block += "\n"
+        content += block
+        do {
+            try content.write(toFile: txtPath, atomically: true, encoding: .utf8)
+            return txtPath
+        } catch {
+            tech("Transcoding-Ergebnis konnte nicht angehängt werden: \(error.localizedDescription)\n")
+            return nil
+        }
     }
 
     // -------------------------------------------------------------------
