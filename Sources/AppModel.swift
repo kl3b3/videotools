@@ -332,19 +332,39 @@ final class AppModel {
 
         let df = DateFormatter(); df.dateFormat = "dd.MM.yyyy HH:mm:ss"
 
+        func estMB(_ kbps: Int) -> String {
+            String(format: "%.0f", Double(kbps) * 1000 * Double(durSec) / 8 / 1_048_576)
+        }
         var estimateBlock = ""
-        if let preset = settings.selectedPreset {
+        if let preset = settings.selectedPreset, durSec > 0 {
             var lines: [String] = []
             for r in preset.renditions {
-                let kbps = r.estimatedBitrateKbps
-                let mb = Double(kbps) * 1000 * Double(durSec) / 8 / 1_048_576
-                lines.append("  \(r.name) (~\(kbps) kbps) : ~\(String(format: "%.2f", mb)) MB")
+                switch r.container {
+                case .mp3, .wav:
+                    lines.append("  \(r.name) : ~\(estMB(r.estimatedBitrateKbps)) MB")
+                case .mp4:
+                    let audio = r.audioBitrateKbps
+                    switch r.rateControl {
+                    case .cbr:
+                        var line = "  \(r.name) (CBR \(r.videoBitrateKbps) kbps) : ~\(estMB(r.videoBitrateKbps + audio)) MB"
+                        if overall > 0, overall / 1000 < r.videoBitrateKbps {
+                            line += "\n    Achtung: Quelle liefert nur \(overall / 1000) kbps – die Ausgabe kann größer werden als die Quelldatei."
+                        }
+                        lines.append(line)
+                    case .cappedCRF:
+                        lines.append("  \(r.name) (CRF \(r.crf), Deckel \(r.maxrateKbps) kbps) : höchstens ~\(estMB(r.maxrateKbps + audio)) MB, je nach Material meist deutlich weniger")
+                    case .crf:
+                        lines.append("  \(r.name) (CRF \(r.crf), ohne Deckel) : stark materialabhängig, keine verlässliche Schätzung")
+                    }
+                }
             }
             estimateBlock = """
 
 
-            [VORSCHAU-SCHÄTZUNGEN – Preset „\(preset.label)“]
+            [GRÖSSEN-SCHÄTZUNGEN – Preset „\(preset.label)“]
             \(lines.joined(separator: "\n"))
+              Hinweis: Schätzwerte. Die tatsächlichen Größen werden nach der
+              Transkodierung geprüft und im Log ausgewiesen.
             """
         }
 
@@ -490,6 +510,7 @@ final class AppModel {
 
         let renditionCount = preset.renditions.count
         var producedFiles: Set<String> = []
+        var completed: [(name: String, path: String)] = []
         for (rIdx, rendition) in preset.renditions.enumerated() {
             if cancelled { break }
             let fileName = preset.outputFileName(base: baseName(of: input), rendition: rendition)
@@ -545,6 +566,7 @@ final class AppModel {
             currentProcess = nil
             if code == 0 {
                 logSuccess("\(rendition.name) fertig", detail: fileSizeLabel(outFile), path: outFile)
+                completed.append((rendition.name, outFile))
             } else if cancelled {
                 logWarning("\(rendition.name) abgebrochen")
                 // Unvollständige Datei aufräumen
@@ -558,6 +580,37 @@ final class AppModel {
                 stepIndex: stepIndex, stepCount: stepCount,
                 inner: Double(rIdx + 1) / Double(renditionCount)
             )
+        }
+
+        // Abschlussprüfung: tatsächliche Größe und Länge aller erzeugten
+        // Dateien kontrollieren (Schätzungen sind nur grobe Obergrenzen).
+        if !cancelled, !completed.isEmpty {
+            statusText = "Prüfe Dateigrößen …"
+            var parts: [String] = []
+            var totalBytes: Int64 = 0
+            for item in completed {
+                let bytes = fileSizeBytes(item.path) ?? 0
+                totalBytes += bytes
+                parts.append("\(item.name): \(sizeLabel(bytes: bytes))")
+                if bytes == 0 {
+                    logWarning("\(item.name) ist leer (0 Bytes)", detail: "Datei prüfen: \(item.path)")
+                    continue
+                }
+                if probe.duration > 0 {
+                    let outDuration = (await probeVideo(URL(fileURLWithPath: item.path))).duration
+                    if outDuration > 0, abs(outDuration - probe.duration) > 2 {
+                        logWarning("\(item.name) hat eine abweichende Länge",
+                                   detail: "\(hms(Int(outDuration))) statt \(hms(Int(probe.duration))) – Datei prüfen")
+                    }
+                }
+            }
+            var detail = parts.joined(separator: " · ")
+            detail += " — gesamt \(sizeLabel(bytes: totalBytes))"
+            if let sourceBytes = fileSizeBytes(input.path) {
+                detail += ", Quelle \(sizeLabel(bytes: sourceBytes))"
+            }
+            let count = completed.count
+            logSuccess("Dateigrößen geprüft (\(count) Datei\(count == 1 ? "" : "en"))", detail: detail)
         }
         sep()
     }
@@ -580,12 +633,20 @@ final class AppModel {
         String(format: "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
     }
 
-    /// Lesbare Dateigröße, z.B. "12,4 MB".
-    private func fileSizeLabel(_ path: String) -> String? {
+    private func fileSizeBytes(_ path: String) -> Int64? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let bytes = (attrs[.size] as? NSNumber)?.int64Value else { return nil }
+        return bytes
+    }
+
+    /// Lesbare Dateigröße, z.B. "12,4 MB" oder "1,29 GB".
+    private func sizeLabel(bytes: Int64) -> String {
         let mb = Double(bytes) / 1_048_576
         if mb >= 1000 { return String(format: "%.2f GB", mb / 1024) }
         return String(format: "%.1f MB", mb)
+    }
+
+    private func fileSizeLabel(_ path: String) -> String? {
+        fileSizeBytes(path).map { sizeLabel(bytes: $0) }
     }
 }
