@@ -12,6 +12,11 @@ build/
 *.app
 *.dSYM
 
+# Statische ffmpeg-Kompatibilitäts-Binaries (je ~81 MB, nicht versionieren).
+# Beschaffung: Release-Builds von https://evermeet.cx/ffmpeg/ herunterladen
+# und als vendor/ffmpeg-static/{ffmpeg,ffprobe} ablegen.
+vendor/ffmpeg-static/
+
 # Swift
 .DS_Store
 .swiftpm/
